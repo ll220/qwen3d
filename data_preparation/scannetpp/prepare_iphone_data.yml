@@ -1,0 +1,12 @@
+
+# extract RGB frames
+extract_rgb: true
+# extract anonymization masks
+extract_masks: true
+# extract depth frames
+extract_depth: true
+
+# folder where the data is downloaded
+data_root: /data/group_data/katefgroup-ssd/datasets/scannetpp_full
+
+splits: [nvs_sem_val]
