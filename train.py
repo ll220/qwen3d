@@ -961,7 +961,7 @@ def main(args):
     
     if args.eval_only:
         model = Trainer.build_model(cfg)
-        DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
+        checkpoint = DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
             cfg.MODEL.WEIGHTS, resume=args.resume
         )
         res = Trainer.test(cfg, model)
@@ -969,7 +969,11 @@ def main(args):
             raise NotImplementedError
         # if comm.is_main_process():
         # verify_results(cfg, res)
+        # Eval-only builds no Trainer, so nothing else sends these metrics to wandb.
         if wandb.run is not None:
+            # univlg panels plot against global_step; use the checkpoint's iteration.
+            wandb.log({**res, "global_step": checkpoint.get("iteration", 0)})
+            wandb.run.summary.update(res)
             wandb.finish()
         return res
 

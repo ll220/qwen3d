@@ -835,6 +835,18 @@ class Qwen3D(nn.Module):
         ).to(self.device)
         return pixel_values, image_grid_thw
 
+    def _encode_frames_chunked(self, pixel_values, image_grid_thw, frames_per_chunk=8):
+        """Run ``self.visual`` over ``frames_per_chunk`` frames at a time and concatenate."""
+        patches_per_frame = (image_grid_thw[:, 0] * image_grid_thw[:, 1] * image_grid_thw[:, 2]).tolist()
+        pv_chunks = torch.split(pixel_values, patches_per_frame, dim=0)
+        featurecloud = []
+        for start in range(0, len(patches_per_frame), frames_per_chunk):
+            end = start + frames_per_chunk
+            featurecloud.append(
+                self.visual(torch.cat(pv_chunks[start:end], dim=0), grid_thw=image_grid_thw[start:end])
+            )
+        return torch.cat(featurecloud, dim=0)
+
     def _split_vit_features_by_frame(self, featurecloud, image_grid_thw):
         """Split concatenated ViT tokens back into one tensor per frame."""
         # Lucy: I've verified that qwen vit both preserves order of tokens and merges tokens with this logic
@@ -897,7 +909,14 @@ class Qwen3D(nn.Module):
 
         pixel_values, image_grid_thw = self._prepare_pixel_values(batched_inputs)
         with torch.no_grad():
-            featurecloud = self.visual(pixel_values, grid_thw=image_grid_thw)
+            if self.training:
+                featurecloud = self.visual(pixel_values, grid_thw=image_grid_thw)
+            else:
+                # The ViT's SDPA path builds a dense [S, S] mask over all frames' patches even
+                # though attention is block-diagonal per frame (cu_seqlens), so a whole-scene
+                # cache miss (e.g. 63 frames -> ~18 GB) OOMs. Encoding frames in chunks is
+                # equivalent and bounds that memory.
+                featurecloud = self._encode_frames_chunked(pixel_values, image_grid_thw)
 
         if self.training and self.cfg.CACHE_QWEN_FEATURES and "scannet" in sample.get("dataset_name", ""):
             self._cache_vit_features(
