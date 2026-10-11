@@ -93,11 +93,10 @@ class VQAEvaluator(DatasetEvaluator):
 
     # called per dataset
     def evaluate(self):
-        self.res = [self.results]
-
         if is_dist_avail_and_initialized():
-            res = all_gather(self.res)
-            res = list(itertools.chain(*res))[0]
+            # InferenceSampler gives each rank a contiguous slice; concatenate
+            # every rank's list (not just rank 0's) to score the whole split.
+            res = list(itertools.chain(*all_gather(self.results)))
             comm.synchronize()
             if self.evaluate_detection:
                 detection_result = self.detection_evaluator.evaluate()
@@ -139,12 +138,14 @@ class VQAEvaluator(DatasetEvaluator):
         print(f'exact match: {np.round(exact_matches / len(res), 4)}, ')
 
         for metric_name in self.metric2scorer.keys():
-            scores = self.metric2scorer[metric_name].compute_score(gts, preds)[1]
+            # Report the scorer's corpus-level score (standard pycocoevalcap protocol).
+            # The mean of per-sentence scores is wrong for BLEU-4 (~0 for the 1-3 word
+            # answers here) and is not METEOR's aggregate. CIDEr/ROUGE are unaffected.
+            score = self.metric2scorer[metric_name].compute_score(gts, preds)[0]
             if metric_name == 'bleu':
-                scores = scores[-1] # bleu-4
-            scores = np.array(scores)
-            print(f'{metric_name}: {np.round(scores.mean(), 4)}, ', end='')
-            eval_results[metric_name] = scores.mean()
+                score = score[-1] # bleu-4
+            print(f'{metric_name}: {np.round(score, 4)}, ', end='')
+            eval_results[metric_name] = float(score)
         print()
 
         if self.evaluate_detection:

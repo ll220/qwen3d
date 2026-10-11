@@ -442,10 +442,11 @@ class ScannetppDatasetMapper:
             )
         elif self.cfg.SAMPLING_STRATEGY == "consecutive":
             if not self.is_train:
-                # print(f"Keeping {num_sample_frames} frames from {len(dataset_dict['file_names'])}")
-                # uniform sampling
-                sample_factor = len(dataset_dict["file_names"]) // num_sample_frames
-                start_point = 0
+                # Uniform sampling over the whole trajectory. A floor(N / M) stride from
+                # frame 0 kept only the first M frames whenever M < N < 2M.
+                sample_ids = np.linspace(
+                    0, len(dataset_dict["file_names"]) - 1, num_sample_frames
+                ).round().astype(int).tolist()
             else:
                 if self.sample_chunk_aug:
                     sample_factor = np.random.randint(1, self.cfg.INPUT.CHUNK_AUG_MAX)
@@ -453,10 +454,10 @@ class ScannetppDatasetMapper:
                     sample_factor = 1
                 # sample_factor = np.random.randint(1, self.cfg.INPUT.CHUNK_AUG_MAX)
                 start_point = np.random.randint(0, len(dataset_dict["file_names"]))
-            sample_ids = [
-                (start_point + i * sample_factor) % len(dataset_dict["file_names"])
-                for i in range(num_sample_frames)
-            ]
+                sample_ids = [
+                    (start_point + i * sample_factor) % len(dataset_dict["file_names"])
+                    for i in range(num_sample_frames)
+                ]
         else:
             raise NotImplementedError(f"Sampling strategy {self.cfg.SAMPLING_STRATEGY} not implemented")
 

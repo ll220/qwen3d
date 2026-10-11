@@ -169,7 +169,11 @@ def load_scannet_data(
                         torch.ones((cfg.MODEL.MAX_SEQ_LEN)) * -1
                     )
                     tokens_positive = [[]]
-                    text_caption = ""
+                    # text_caption is also the LLM prompt; keep the question for QA samples
+                    # at eval. Training keeps the original behavior so released
+                    # checkpoints stay reproducible.
+                    if is_training or not batched_input.get("do_generate", False):
+                        text_caption = ""
             
             batched_input["scannet_coords"] = scennet_pc_processed[-1]
             
@@ -352,7 +356,16 @@ def load_scannet_data(
                             torch.ones((cfg.MODEL.MAX_SEQ_LEN)) * -1
                         )
                         tokens_positive = [[]]
-                        text_caption = ""
+                        # text_caption is also the LLM prompt: blanking it for QA samples
+                        # erased the question whenever their target ids were absent from
+                        # the cloud (e.g. SQA3D's dummy target_id=0). Keep the question at
+                        # eval; training keeps the original behavior so released
+                        # checkpoints stay reproducible.
+                        text_caption = (
+                            batched_input["sr3d_data"][0]["text_caption"]
+                            if batched_input.get("do_generate", False) and not is_training
+                            else ""
+                        )
 
                 else:
                     scannet_masks = torch.stack(scannet_masks, dim=0)
