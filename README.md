@@ -19,7 +19,7 @@ Carnegie Mellon University
 [![Paper](https://img.shields.io/badge/arXiv-2608.02980-b31b1b.svg)](https://arxiv.org/abs/2608.02980)
 [![Hugging Face Model](https://img.shields.io/badge/HuggingFace-Model-yellow)](https://huggingface.co/katefgroup/Qwen-3D)
 [![Hugging Face Dataset](https://img.shields.io/badge/HuggingFace-Dataset-yellow)](https://huggingface.co/datasets/katefgroup/qwen3d_cached_scannet_vit_features)
-
+[![Papers with Code: #2 on ScanRefer](https://paperswithcode.co/api/v1/papers/2608.02980/leaderboard-badge.svg?eval=35502&live=1)](https://paperswithcode.co/api/v1/papers/2608.02980/leaderboard-badge-link?eval=35502)
 </div>
 
 ## Installation
