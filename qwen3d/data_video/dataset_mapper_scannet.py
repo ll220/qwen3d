@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import os
 import copy
 import logging
 import random
@@ -360,6 +361,18 @@ class ScannetDatasetMapper:
     def subsample_frames(self, dataset_dict, **kwargs):
         num_sample_frames = self.num_frames
         
+        # FRAME_MODE (eval only): ignore the per-query annotated `frames_used`; 'all' keeps every extracted
+        # frame of the scene, 'every2' every 2nd one.
+        _fm = os.environ.get("FRAME_MODE", "annotated")
+        if not self.is_train and _fm in ("all", "every2"):
+            n = len(dataset_dict["file_names"])
+            sample_ids = list(range(0, n, 2 if _fm == "every2" else 1))
+            for key in ["file_names", "depth_file_names", "pose_file_names", "annotations",
+                        "segment_file_names", "valid_file_names", "image_ids"]:
+                dataset_dict[key] = [dataset_dict[key][i] for i in sample_ids]
+            dataset_dict["length"] = len(dataset_dict["file_names"])
+            return dataset_dict
+
         if not self.is_train and self.cfg.MAX_FRAME_NUM != -1:
             num_sample_frames = self.cfg.MAX_FRAME_NUM
         if len(dataset_dict["file_names"]) <= num_sample_frames and not self.is_train:

@@ -14,7 +14,7 @@ from prettytable import PrettyTable
 from torch.nn import functional as F
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from pytorch3d.ops import knn_points
+from qwen3d.utils.knn import knn_points
 import pyviz3d.visualizer as viz
 from pathlib import Path
 import detectron2.utils.comm as comm
@@ -43,7 +43,7 @@ def visualize_pc_masks_and_bbox(
     pred_pcs, gt_bbox, pred_bbox,
     data_dir=None, sample_name=None, inputs=None,
     gt_anchor_pcs=None, gt_anchor_bboxs=None, sr3d_data=None,
-    anchor_pcs=None, anchor_bboxs=None
+    anchor_pcs=None, anchor_bboxs=None, llm_xyz=None
 ):
     """
     Input
@@ -61,6 +61,12 @@ def visualize_pc_masks_and_bbox(
                  alpha=0.8,
                  visible=True,
                  point_size=25)
+
+    if llm_xyz is not None and len(llm_xyz) > 0:
+        # voxel-pooled tokens (5 cm voxel centers) that were fed to the LLM
+        v.add_points("LLM input (voxel tokens)", np.asarray(llm_xyz, dtype=np.float32),
+                     colors=np.tile(np.array([0, 200, 255])[None], (len(llm_xyz), 1)),
+                     alpha=0.9, visible=False, point_size=point_size)
 
      # add gt masks
     masks_colors = [np.tile(np.array([0, 255, 0])[None], (pc.shape[0], 1)) for pc in gt_pcs]
@@ -163,6 +169,48 @@ def visualize_pc_masks_and_bbox(
     
     print(f"Saved to {data_dir}")
     v.save(str(data_dir))
+
+def save_query_png(path, pc, color, gt_pc, pred_pc, gt_bbox, pred_bbox, title):
+    """Static view of one query: top-down (full + zoomed) and side view, GT green / prediction red."""
+    from matplotlib.patches import Rectangle
+    rng = np.random.default_rng(0)
+    col = np.asarray(color, dtype=np.float32)
+    col = np.clip(col / 255.0 if col.max() > 1.5 else col, 0, 1)
+    zmin, zmax = float(pc[:, 2].min()), float(pc[:, 2].max())
+    boxes = [b for b in (gt_bbox, pred_bbox) if np.all(np.isfinite(b))]
+    zoom = [gt_bbox] if np.all(np.isfinite(gt_bbox)) else boxes  # zoom on the target, not on a huge prediction
+    lo = np.min([b[:3] for b in zoom], axis=0) - 1.5
+    hi = np.max([b[3:] for b in zoom], axis=0) + 1.5
+    cut_z = max(zmin + 0.7 * (zmax - zmin), max(b[5] for b in boxes) + 0.05)  # hide ceiling in top-down views
+
+    def draw(ax, a, b, sel, x_lim=None, y_lim=None):
+        if len(sel) > 200000:
+            sel = rng.choice(sel, 200000, replace=False)
+        ax.set_facecolor("#2b2b2b")
+        ax.scatter(pc[sel, a], pc[sel, b], c=col[sel], s=1.5, linewidths=0)
+        for pts, c in ((gt_pc, "lime"), (pred_pc, "red")):
+            if len(pts):
+                ax.scatter(pts[:, a], pts[:, b], c=c, s=3, alpha=0.6, linewidths=0)
+        for bx, c in ((gt_bbox, "lime"), (pred_bbox, "red")):
+            if np.all(np.isfinite(bx)):
+                ax.add_patch(Rectangle((bx[a], bx[b]), bx[3 + a] - bx[a], bx[3 + b] - bx[b],
+                                       fill=False, ec=c, lw=2.0))
+        ax.set_aspect("equal")
+        ax.set_xticks([]); ax.set_yticks([])
+        if x_lim is not None:
+            ax.set_xlim(*x_lim); ax.set_ylim(*y_lim)
+
+    inx = np.all((pc[:, :3] >= lo) & (pc[:, :3] <= hi), axis=1)
+    fig, axs = plt.subplots(1, 3, figsize=(18, 6.2))
+    draw(axs[0], 0, 1, np.nonzero(pc[:, 2] <= cut_z)[0]); axs[0].set_title("top-down (ceiling hidden)")
+    draw(axs[1], 0, 1, np.nonzero(inx & (pc[:, 2] <= cut_z))[0], (lo[0], hi[0]), (lo[1], hi[1])); axs[1].set_title("top-down zoom (on target)")
+    draw(axs[2], 0, 2, np.nonzero(inx)[0], (lo[0], hi[0]), (lo[2], hi[2])); axs[2].set_title("side view (x-z), zoom on target")
+    fig.suptitle(title + "\n(green = ground truth, red = prediction)", fontsize=11)
+    fig.tight_layout()
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=90)
+    plt.close(fig)
+
 
 def get_color(max_value: int, colormap='spring'):
     colormap = plt.get_cmap('spring')  # Pink is 0, Yellow is 1
@@ -455,7 +503,39 @@ class ReferrentialGroundingEvaluator(DatasetEvaluator):
             else:
                 return
 
-        if self.cfg.VISUALIZE_REF:
+        # Optional subsampled visualization: VIZ_STRIDE=k shows every k-th query. PNGs go to VIZ_PNG_DIR,
+        # interactive PyViz3D scenes (VISUALIZE_REF) are limited to the same queries.
+        _stride = int(os.environ.get("VIZ_STRIDE", "0"))
+        self._q_seen = getattr(self, "_q_seen", 0)
+        _do_viz = _stride > 0 and self._q_seen % _stride == 0
+        self._q_seen += 1
+        if _do_viz and os.environ.get("VIZ_PNG_DIR"):
+            try:
+                _d = inputs[0]['sr3d_data'][0]
+                _scene = inputs[0]['file_name'].split('/')[-3]
+                _iou_b = float(np.ravel(locals().get('ious', [[0.0]])[0])[0])
+                _iou_m = float(np.ravel(locals().get('mask_ious', [[0.0]])[0])[0])
+                _png = f"{os.environ['VIZ_PNG_DIR']}/{self._q_seen - 1:03d}_{_scene}.png"
+                save_query_png(
+                    _png, inputs[0]['scannet_coords'].numpy(), inputs[0]['scannet_color'].numpy(),
+                    gt_pc, pred_pcs[0], np.asarray(gt_bbox).reshape(-1)[:6], np.asarray(top_bboxs[0]),
+                    f"{_scene} | \"{_d['text_caption']}\" | target: {_d.get('target_name', '')} | "
+                    f"box IoU {_iou_b:.2f}  mask IoU {_iou_m:.2f}")
+                np.savez_compressed(
+                    _png.replace('.png', '.npz'), pc=inputs[0]['scannet_coords'].numpy().astype(np.float32),
+                    color=inputs[0]['scannet_color'].numpy().astype(np.uint8), gt_pc=gt_pc.astype(np.float32),
+                    pred_pc=pred_pcs[0].astype(np.float32), gt_bbox=np.asarray(gt_bbox).reshape(-1)[:6],
+                    pred_bbox=np.asarray(top_bboxs[0]), caption=_d['text_caption'],
+                    target=_d.get('target_name', ''), scene=_scene, box_iou=_iou_b, mask_iou=_iou_m,
+                    llm_xyz=outputs[0]['llm_voxel_xyz'].numpy() if 'llm_voxel_xyz' in outputs[0] else np.zeros((0, 3), np.float32))
+                with open(f"{os.environ['VIZ_PNG_DIR']}/index.jsonl", "a") as _f:
+                    _f.write(json.dumps({"file": os.path.basename(_png), "scene": _scene,
+                                         "caption": _d['text_caption'], "target": _d.get('target_name', ''),
+                                         "box_iou": _iou_b, "mask_iou": _iou_m}) + "\n")
+            except Exception as e:
+                print(f"PNG visualization failed: {e}")
+
+        if self.cfg.VISUALIZE_REF and (_stride == 0 or _do_viz):
             gt_anchor_bboxs = None
             gt_anchor_pcs = None
             anchor_pcs = None
@@ -498,7 +578,8 @@ class ReferrentialGroundingEvaluator(DatasetEvaluator):
                 gt_anchor_bboxs=gt_anchor_bboxs,
                 sr3d_data=inputs[0]['sr3d_data'][0],
                 anchor_pcs=anchor_pcs,
-                anchor_bboxs=anchor_bboxs
+                anchor_bboxs=anchor_bboxs,
+                llm_xyz=outputs[0]['llm_voxel_xyz'].numpy() if 'llm_voxel_xyz' in outputs[0] else None
             )
 
         self.detection_results.append(detected)

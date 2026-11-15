@@ -1089,7 +1089,10 @@ class Qwen3D(nn.Module):
             # Empty captions break the chat template; substitute a single space.
             target_sentence = [s if s != "" else " " for s in target_sentence]
 
-            if self.training and decoder_3d:
+            # EVAL_MAX_TOKENS=k (eval only): randomly keep k voxel tokens, like the 4096 used in training. Needed when
+            # many frames are used (FRAME_MODE=all/every2 gives 30k-125k voxels, far beyond what the LLM was trained on).
+            _cap = 0 if self.training else int(os.environ.get("EVAL_MAX_TOKENS", "0"))
+            if (self.training or _cap > 0) and decoder_3d:
                 (
                     pointcloud,
                     featurecloud,
@@ -1097,7 +1100,7 @@ class Qwen3D(nn.Module):
                     pixel_indices,
                 ) = self.random_sample_pointcloud(
                     pointcloud, featurecloud, pixel_indices, point2voxel,
-                    target_points=4096,
+                    target_points=4096 if self.training else _cap,
                 )
             if self.training and self.cfg.GENERATION:
                 if actual_decoder_3d:
@@ -1499,6 +1502,11 @@ class Qwen3D(nn.Module):
                 multiview_data if decoder_3d else None,
                 actual_decoder_3d=actual_decoder_3d,
             )
+
+        if os.environ.get("VIZ_STRIDE", "0") != "0" and decoder_3d and isinstance(processed_results, list) \
+                and len(processed_results) > 0:
+            # voxel-pooled tokens (centers) the LLM actually received, for visualization
+            processed_results[0]["llm_voxel_xyz"] = pointcloud[0].detach().float().cpu()
 
         if generation_language is not None:
             return generation_language, processed_results

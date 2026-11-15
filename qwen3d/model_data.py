@@ -17,7 +17,7 @@ from qwen3d.modeling.backproject.backproject import (
     voxel_map_to_source,
     voxelization,
 )
-from pytorch3d.ops import knn_points
+from qwen3d.utils.knn import knn_points
 import numpy as np
 import torch
 from torch.nn import functional as F
