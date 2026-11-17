@@ -183,6 +183,8 @@ VISUALIZE_LOG_DIR "$OUTPUT_DIR/viz_ref" \
 TEST_RESULT_EXPORT_PATH "$OUTPUT_DIR/test_results" \
 BREAKPOINT_ON_ERROR $BREAKPOINT_ON_ERROR \
 $@
-if [[ $? == 124 ]]; then 
+status=$?
+if [[ $status == 124 ]]; then
   scontrol requeue $SLURM_JOB_ID
 fi
+exit $status

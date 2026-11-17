@@ -116,7 +116,7 @@ class Qwen3D(nn.Module):
                     name=name,
                     resume="allow",
                     config=cfg,
-                    mode="online",
+                    mode=os.environ.get("WANDB_MODE", "online"),
                     settings=wandb.Settings(init_timeout=120),
                     id=name,
                 )
