@@ -70,23 +70,23 @@ BREAKPOINT_ON_ERROR=${BREAKPOINT_ON_ERROR:-False}
 
 RESUME=${RESUME:-1}
 
-# babel paths
-export DETECTRON2_DATASETS_2D="/data/group_data/katefgroup-ssd/vlm/lucy/datasets_2d"
-export DETECTRON2_DATASETS="/data/user_data/lucylin/SEMSEG_100k"
-export SCANNET_PP_DATASET="/data/group_data/katefgroup/language_grounding/scannetpp/"
-export REF_DATASET="/data/user_data/ayushj2/refer_it_3d/"
-export LOCATE3D_DATASET="/data/group_data/katefgroup-ssd/vlm/lucy/locate_3d"
-export COCO_REF_DATASET="/data/group_data/katefgroup-ssd/vlm/lucy/datasets_2d"
-export CLIP_SAMPLING_PATH="/data/user_data/ayushj2/refer_it_3d"
-export PRECOMPUTED_SCANNET_PATH="/data/user_data/ayushj2/refer_it_3d/"
-export LLAVA_INSTRUCT_PATH="/data/group_data/katefgroup-ssd/vlm/lucy/llava_instruct/llava_instruct_150k.json"
-MATTERPORT_DATA_DIR="/data/group_data/katefgroup-ssd/vlm/lucy/mask3d_processed/matterport/train_validation_database.yaml"
-SCANNET200_DATA_DIR="/data/group_data/katefgroup-ssd/vlm/lucy/mask3d_processed/scannet200/train_validation_database.yaml"
-OUTPUT_DIR_PREFIX="/data/group_data/katefgroup/language_grounding/qwen3d_outputs/train"
-SCANNET_DATA_DIR="/data/group_data/katefgroup-ssd/vlm/lucy/mask3d_processed/scannet/train_validation_database.yaml"
-S3DIS_DATA_DIR="/data/user_data/lucylin/SEMSEG_100k/s3dis/train_validation_database.yaml"
-SCANNETPP_DATA_DIR="/data/group_data/katefgroup-ssd/vlm/lucy/mask3d_processed/scannetpp/validation_database.yaml"
-FEATURE_DIR="/data/user_data/lucylin/scannet_image_qwen_features"
+# babel paths (defaults; override any of these from the environment)
+export DETECTRON2_DATASETS_2D="${DETECTRON2_DATASETS_2D:-/data/group_data/katefgroup-ssd/vlm/lucy/datasets_2d}"
+export DETECTRON2_DATASETS="${DETECTRON2_DATASETS:-/data/user_data/lucylin/SEMSEG_100k}"
+export SCANNET_PP_DATASET="${SCANNET_PP_DATASET:-/data/group_data/katefgroup/language_grounding/scannetpp/}"
+export REF_DATASET="${REF_DATASET:-/data/user_data/ayushj2/refer_it_3d/}"
+export LOCATE3D_DATASET="${LOCATE3D_DATASET:-/data/group_data/katefgroup-ssd/vlm/lucy/locate_3d}"
+export COCO_REF_DATASET="${COCO_REF_DATASET:-/data/group_data/katefgroup-ssd/vlm/lucy/datasets_2d}"
+export CLIP_SAMPLING_PATH="${CLIP_SAMPLING_PATH:-/data/user_data/ayushj2/refer_it_3d}"
+export PRECOMPUTED_SCANNET_PATH="${PRECOMPUTED_SCANNET_PATH:-/data/user_data/ayushj2/refer_it_3d/}"
+export LLAVA_INSTRUCT_PATH="${LLAVA_INSTRUCT_PATH:-/data/group_data/katefgroup-ssd/vlm/lucy/llava_instruct/llava_instruct_150k.json}"
+MATTERPORT_DATA_DIR="${MATTERPORT_DATA_DIR:-/data/group_data/katefgroup-ssd/vlm/lucy/mask3d_processed/matterport/train_validation_database.yaml}"
+SCANNET200_DATA_DIR="${SCANNET200_DATA_DIR:-/data/group_data/katefgroup-ssd/vlm/lucy/mask3d_processed/scannet200/train_validation_database.yaml}"
+OUTPUT_DIR_PREFIX="${OUTPUT_DIR_PREFIX:-/data/group_data/katefgroup/language_grounding/qwen3d_outputs/train}"
+SCANNET_DATA_DIR="${SCANNET_DATA_DIR:-/data/group_data/katefgroup-ssd/vlm/lucy/mask3d_processed/scannet/train_validation_database.yaml}"
+S3DIS_DATA_DIR="${S3DIS_DATA_DIR:-/data/user_data/lucylin/SEMSEG_100k/s3dis/train_validation_database.yaml}"
+SCANNETPP_DATA_DIR="${SCANNETPP_DATA_DIR:-/data/group_data/katefgroup-ssd/vlm/lucy/mask3d_processed/scannetpp/validation_database.yaml}"
+FEATURE_DIR="${FEATURE_DIR:-/data/user_data/lucylin/scannet_image_qwen_features}"
 
 echo "BS: ${BS}, NUM_GPUS: ${NUM_GPUS}, SAMPLING_FRAME_NUM: ${SAMPLING_FRAME_NUM}, NUM_DATALOADERS: ${NUM_DATALOADERS}, VAL: ${NUM_VAL_DATALOADERS}"
 

@@ -1034,7 +1034,11 @@ class Qwen3D(nn.Module):
                 scannet_all_masks_batched,
             ) = (None, None, None, None, None)
 
-            if self.cfg.USE_GHOST_POINTS and decoder_3d:
+            # Generation-only samples without a scene mesh (vlmcd change detection) skip
+            # the ghost points: no mask targets are needed, only the prompt.
+            skip_ghost = batched_inputs[0].get("skip_ghost_points", False)
+
+            if self.cfg.USE_GHOST_POINTS and decoder_3d and not skip_ghost:
                 full_scene_dataset = batched_inputs[0]["full_scene_dataset"]
                 (
                     scannet_pc,
@@ -1058,7 +1062,9 @@ class Qwen3D(nn.Module):
                     pixel_std=self.pixel_std,
                 )
 
-            if self.cfg.USE_GHOST_POINTS and decoder_3d:
+            if skip_ghost:
+                targets = [{"text_caption": b["sr3d_data"][0]["text_caption"]} for b in batched_inputs]
+            elif self.cfg.USE_GHOST_POINTS and decoder_3d:
                 targets = scannet_gt_target_dicts
             else:
                 targets = prepare_targets(

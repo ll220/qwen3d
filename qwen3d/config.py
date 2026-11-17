@@ -450,3 +450,17 @@ def add_maskformer2_video_config(cfg):
     cfg.LORA_ALPHA = 16
     cfg.LORA_DROPOUT = 0.1
     cfg.QWEN_MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
+
+    # Change-detection QA on DR8803VL/vlm-change-detection-4k (vlmcd_<task>_<split> datasets,
+    # qwen3d/data_video/dataset_mapper_vlm_cd.py). The index and splits live in $VLMCD_DATA_DIR.
+    cfg.VLMCD = CN()
+    cfg.VLMCD.FRAMES_PER_STATE = 16      # frames from each of the before / after walkthroughs (128 each)
+    cfg.VLMCD.SAME_FRAMES = True         # use the same camera views for both states
+    cfg.VLMCD.IMAGE_SIZE = 448           # upsample the 256 px frames (0 keeps 256: 81 instead of 256 tokens/frame)
+    cfg.VLMCD.AFTER_OFFSET = 20.0        # metres the after scan is shifted along +x (rooms are < 11 m)
+    cfg.VLMCD.ONLY_VISIBLE_CHANGES = True  # answers list only changes seen in the chosen frames
+    cfg.VLMCD.MIN_VISIBLE_PIXELS = 20    # pixels (at 256 px) for a change to count as seen
+    cfg.VLMCD.RETRIES = 5                # Hub read attempts per example
+    cfg.VLMCD.CACHE_DIR = ""             # if set, cache eval frames here (deterministic at eval)
+    cfg.VLMCD.LOCAL_DIR = ""             # read shards from a local `hf download` copy instead of streaming
+    cfg.VLMCD.EVAL_SUBSET = 0            # evaluate on a fixed random subset of this many examples (0: all)

@@ -37,6 +37,7 @@ from qwen3d.data_video.dataset_mapper_ref_coco import RefCocoDatasetMapper
 from qwen3d.data_video.dataset_mapper_scannet import ScannetDatasetMapper
 from qwen3d.data_video.dataset_mapper_language import Sr3dDatasetMapper
 from qwen3d.data_video.dataset_mapper_hf import HFDatasetMapper,HFDatasetTextMapper
+from qwen3d.data_video.dataset_mapper_vlm_cd import VlmCdDatasetMapper
 
 from detectron2.utils import comm
 
@@ -111,7 +112,9 @@ def get_multiple_train_3d_dataset_dicts(cfg):
     ]
 
     mappers = [
-        ScannetDatasetMapper(
+        VlmCdDatasetMapper(
+            cfg, is_train=True, dataset_name=dataset_name,
+        ) if dataset_name.startswith("vlmcd_") else ScannetDatasetMapper(
             cfg, is_train=True,
             dataset_name=dataset_name,
             dataset_dict=dataset_dict

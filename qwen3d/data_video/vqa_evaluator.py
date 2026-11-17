@@ -37,6 +37,62 @@ from pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
 
 tokenizer = PTBTokenizer()
 
+
+def vlmcd_metrics(dataset_name, res):
+    """Task metrics for ``vlmcd_<task>_<split>`` predictions.
+
+    Parameters
+    ----------
+    dataset_name : str
+    res : list of tuple
+        ``(prediction, [answer])`` pairs, lower-cased.
+
+    Returns
+    -------
+    dict
+        ``describe``: micro precision / recall / F1 over ``(action, category)`` changes,
+        and per-action F1. ``count``: per-action and all-actions count accuracy, and the
+        mean absolute error of the total.
+    """
+    from qwen3d.data_video.datasets.vlm_cd import ACTIONS, dataset_task, parse_count, parse_describe
+    out = {}
+    task = dataset_task(dataset_name)
+    if task == "describe":
+        tp = fp = fn = 0
+        per = {a: [0, 0, 0] for a in ACTIONS}
+        for pred, answers in res:
+            p, g = parse_describe(pred), parse_describe(answers[0])
+            for key in set(p) | set(g):
+                t = min(p[key], g[key])
+                tp += t
+                fp += p[key] - t
+                fn += g[key] - t
+                per[key[0]][0] += t
+                per[key[0]][1] += p[key] - t
+                per[key[0]][2] += g[key] - t
+        prec = tp / (tp + fp) if tp + fp else 0.0
+        rec = tp / (tp + fn) if tp + fn else 0.0
+        out.update(change_precision=prec, change_recall=rec,
+                   change_f1=2 * prec * rec / (prec + rec) if prec + rec else 0.0)
+        for a, (t, f_p, f_n) in per.items():
+            out[f"{a}_f1"] = 2 * t / (2 * t + f_p + f_n) if t + f_p + f_n else 0.0
+    elif task == "count":
+        correct = {a: 0 for a in ACTIONS}
+        all_correct, abs_err = 0, 0.0
+        for pred, answers in res:
+            p, g = parse_count(pred), parse_count(answers[0])
+            ok = [p[a] == g[a] for a in ACTIONS]
+            for a, o in zip(ACTIONS, ok):
+                correct[a] += o
+            all_correct += all(ok)
+            abs_err += abs(sum(p[a] or 0 for a in ACTIONS) - sum(g[a] or 0 for a in ACTIONS))
+        n = max(len(res), 1)
+        out.update({f"{a}_count_acc": correct[a] / n for a in ACTIONS})
+        out.update(count_all_acc=all_correct / n, total_count_mae=abs_err / n)
+    print(", ".join(f"{k}: {v:.4f}" for k, v in out.items()))
+    return out
+
+
 class VQAEvaluator(DatasetEvaluator):
     def __init__(
         self,
@@ -49,6 +105,7 @@ class VQAEvaluator(DatasetEvaluator):
         self.cfg = cfg
         self.num_viz = 0
         self.results = []
+        self.vlmcd_records = []
         self.metric2scorer = {'cider': Cider(), 'bleu': Bleu(), 'meteor': Meteor(), 'rouge': Rouge()}
 
         self.evaluate_detection = evaluate_detection
@@ -66,9 +123,22 @@ class VQAEvaluator(DatasetEvaluator):
 
     def reset(self):
         self.results = []
+        self.vlmcd_records = []
         self.num_viz = 0
         if self.evaluate_detection:
             self.detection_evaluator.reset()
+
+    def _save_vlmcd_predictions(self, eval_results):
+        """Write per-example predictions and the metrics to the inference folder."""
+        import json
+        import os
+        root = getattr(self.cfg, "OUTPUT_DIR", None) if self.cfg is not None else None
+        if not root:
+            return
+        out_dir = os.path.join(root, "inference")
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, f"{self.dataset_name}_predictions.json"), "w") as f:
+            json.dump({"metrics": eval_results, "predictions": self.vlmcd_records}, f, indent=1)
 
     # called per batch
     def process(self, inputs, outputs):
@@ -81,6 +151,14 @@ class VQAEvaluator(DatasetEvaluator):
                     self.results.append((outputs[0][i].lower(), [answer.lower() for answer in inputs[0]['sr3d_data'][i]['answers']]))
                 elif 'scanqa' in self.dataset_name or 'sqa3d' in self.dataset_name:
                     self.results.append((outputs[0][i].lower(), [answer.lower() for answer in inputs[0]['sr3d_data'][i]['answers']]))
+                elif self.dataset_name.startswith('vlmcd_'):
+                    self.results.append((outputs[0][i].lower().strip(), [answer.lower() for answer in inputs[0]['sr3d_data'][i]['answers']]))
+                    self.vlmcd_records.append({
+                        "example_id": inputs[0]['sr3d_data'][i]['example_id'],
+                        "frame_ids": inputs[0].get('frame_ids'),
+                        "prediction": outputs[0][i].strip(),
+                        "answer": inputs[0]['sr3d_data'][i]['answers'][0],
+                    })
             else:
                 if self.dataset_name == "mmlupro_text_bench":
                     self.results.append((outputs[0][i].lower(), inputs[i]['answer'].lower()))
@@ -97,6 +175,7 @@ class VQAEvaluator(DatasetEvaluator):
             # InferenceSampler gives each rank a contiguous slice; concatenate
             # every rank's list (not just rank 0's) to score the whole split.
             res = list(itertools.chain(*all_gather(self.results)))
+            self.vlmcd_records = list(itertools.chain(*all_gather(self.vlmcd_records)))
             comm.synchronize()
             if self.evaluate_detection:
                 detection_result = self.detection_evaluator.evaluate()
@@ -121,6 +200,9 @@ class VQAEvaluator(DatasetEvaluator):
                     exact_matches += 1
                 else:
                     print(f"Incorrect: Predicted: {res[i][0]}, Ground Truth: {res[i][1]}")
+            elif self.dataset_name.startswith('vlmcd_'):
+                # Long answers: count exact matches without printing every miss.
+                exact_matches += res[i][0].rstrip(".") in [a.rstrip(".") for a in res[i][1]]
             elif 'scanqa' in self.dataset_name or 'sqa3d' in self.dataset_name:
                 if res[i][0] in res[i][1]:
                     exact_matches += 1
@@ -150,6 +232,10 @@ class VQAEvaluator(DatasetEvaluator):
 
         if self.evaluate_detection:
             eval_results.update(detection_result)
+
+        if self.dataset_name.startswith('vlmcd_'):
+            eval_results.update(vlmcd_metrics(self.dataset_name, res))
+            self._save_vlmcd_predictions(eval_results)
 
         if is_dist_avail_and_initialized():
             comm.synchronize()

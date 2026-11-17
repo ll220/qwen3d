@@ -16,6 +16,7 @@ import gc
 import itertools
 import logging
 import os
+import random
 import time
 import warnings
 import weakref
@@ -80,6 +81,7 @@ from qwen3d import (
     get_detection_dataset_dicts,
 )
 from qwen3d.data_video.data_utils import resolve_feature_dir_for_backbone
+from qwen3d.data_video.dataset_mapper_vlm_cd import VlmCdDatasetMapper
 from qwen3d.data_video.build import (
     get_multiple_train_2d_dataset_dicts,
     get_multiple_train_3d_dataset_dicts,
@@ -276,6 +278,9 @@ class Trainer(DefaultTrainer):
             os.makedirs(output_folder, exist_ok=True)
         evaluators = []
 
+        if dataset_name.startswith("vlmcd_"):
+            return [VQAEvaluator(dataset_name=dataset_name, evaluate_detection=False, cfg=cfg)]
+
         if cfg.TEST.EVAL_3D and cfg.MODEL.DECODER_3D and not use_2d_evaluators_only:
             if 'scanqa' in dataset_name or 'sqa3d' in dataset_name or "bench" in dataset_name:
                 evaluators.append(VQAEvaluator(
@@ -391,7 +396,16 @@ class Trainer(DefaultTrainer):
                 scannet_like = True
                 break
 
-        if "text_bench" in dataset_name:
+        if dataset_name.startswith("vlmcd_"):
+            dataset_dict = get_detection_dataset_dicts([dataset_name])
+            if cfg.VLMCD.EVAL_SUBSET > 0:
+                # A fixed random subset, for quick periodic evals (generation is slow).
+                dataset_dict = random.Random(0).sample(
+                    dataset_dict, min(cfg.VLMCD.EVAL_SUBSET, len(dataset_dict)))
+            mapper = VlmCdDatasetMapper(cfg, is_train=False, dataset_name=dataset_name)
+            return build_detection_test_loader(cfg, mapper=mapper, dataset=dataset_dict)
+
+        elif "text_bench" in dataset_name:
             dataset_dict = LOAD_BENCHMARKS[dataset_name]()
             mapper = HFDatasetTextMapper(
                 cfg=cfg, 
