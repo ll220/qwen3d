@@ -15,6 +15,7 @@ from .load_sqa3d import register_sqa3d
 from .load_sr3d import register_ref
 from .load_coco_ref import register_coco_ref
 from .load_locate3d import register_ref_locate3d
+from .vlm_cd import register_vlmcd
 from .scannet_context import (
     _get_dataset_instances_meta,
     _get_scannet_instances20_meta,
@@ -433,6 +434,10 @@ if __name__.endswith(".builtin"):
     )
     register_ref_locate3d(_root_locate3d)
     
+    # Change detection on DR8803VL/vlm-change-detection-4k (streamed from the Hub;
+    # index and splits in $VLMCD_DATA_DIR, read lazily)
+    register_vlmcd()
+
     _root_2d = os.getenv("DETECTRON2_DATASETS_2D", "datasets")
     # Register COCO datasets
     register_all_coco(_root_2d)

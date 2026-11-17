@@ -9,7 +9,7 @@ from natsort import natsorted as sorted
 import yaml
 import numpy as np
 import torch
-from pytorch3d.ops import knn_points
+from qwen3d.utils.knn import knn_points
 from PIL import Image
 from tqdm import tqdm
 from einops import rearrange
