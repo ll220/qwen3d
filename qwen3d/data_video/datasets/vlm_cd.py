@@ -109,7 +109,7 @@ def clean_surface(name):
     ----------
     name : str or None
         E.g. ``"diningtable_a1271102e7d3313087397a337003b3b7_1_0_0"`` or
-        ``"standardwindow1(3)(2)_..."``.
+        ``"standardwindow1(3)(2)_..."`` or ``"fp301:standardwindow_..."``.
 
     Returns
     -------
@@ -118,7 +118,7 @@ def clean_surface(name):
     """
     if not name:
         return None
-    base = name.split("_")[0]
+    base = name.split("_")[0].split(":")[-1]  # "fp301:standardwindow..." -> "standardwindow"
     base = re.sub(r"\(.*?\)", "", base)
     base = re.sub(r"\d+$", "", base).strip()
     return base or None
@@ -168,23 +168,40 @@ def change_clause(change):
     return f"removed the {cat}" + (f" from the {surf}" if surf else "")
 
 
-def question(task):
+STATE_ENCODINGS = ("time", "offset")
+
+
+def question(task, state_encoding="time"):
     """The prompt for a task.
 
-    The point cloud fed to the model holds the room twice: the scan before the changes,
-    and the scan after them shifted along +x (see ``VlmCdDatasetMapper``).
+    How the two scans reach the model depends on ``VLMCD.STATE_ENCODING`` (see
+    ``VlmCdDatasetMapper``):
+
+    ``time``
+        two point clouds, each in its own ``<|vision_start|>...<|vision_end|>`` block, before
+        first, both at the room's true coordinates and told apart by their time position.
+    ``offset``
+        one point cloud holding the room twice, the after scan shifted along +x.
 
     Parameters
     ----------
     task : str
         One of ``TASKS``.
+    state_encoding : str
+        One of ``STATE_ENCODINGS``.
 
     Returns
     -------
     str
     """
-    intro = ("The point cloud shows the same room scanned twice: first before and then "
-             "after some objects changed; the after scan is shifted along the x axis. ")
+    if state_encoding == "time":
+        intro = ("The two point clouds show the same room scanned twice: the first before "
+                 "and the second after some objects changed. ")
+    elif state_encoding == "offset":
+        intro = ("The point cloud shows the same room scanned twice: first before and then "
+                 "after some objects changed; the after scan is shifted along the x axis. ")
+    else:
+        raise ValueError(f"unknown VLMCD.STATE_ENCODING {state_encoding!r}; expected one of {STATE_ENCODINGS}")
     if task == "describe":
         return intro + ("List every object that was moved, added or removed, "
                         "separated by semicolons.")
@@ -193,7 +210,42 @@ def question(task):
     raise ValueError(task)
 
 
-def answer(task, changes):
+ORDERS = ("size", "dataset")
+
+
+def order_changes(changes, order="size"):
+    """Put changes in the order the ``describe`` answer lists them.
+
+    The language-modelling loss scores the answer token by token, so an arbitrary order
+    of an unordered set adds loss the model cannot reduce. ``size`` makes the order a
+    function of the scene: grouped by action (moved, added, removed, the same order as the
+    ``count`` answer), then largest object first (object-frame bounding-box volume, so
+    rotating an object does not change its rank), with the clause text breaking ties.
+
+    Parameters
+    ----------
+    changes : list of dict
+        Index change records.
+    order : str
+        ``"size"``, or ``"dataset"`` for the order of the dataset's ``changes`` column.
+
+    Returns
+    -------
+    list of dict
+    """
+    if order == "dataset":
+        return list(changes)
+    if order != "size":
+        raise ValueError(f"unknown VLMCD.ANSWER_ORDER {order!r}; expected one of {ORDERS}")
+    if any("volume_m3" not in c for c in changes):
+        raise KeyError("index.json has no object sizes; rebuild it with "
+                       "`python vlm_cd/prepare_vlm_cd.py` or set VLMCD.ANSWER_ORDER dataset")
+    # Identical objects (two chairs of one set) tie on volume; the clause text then decides.
+    return sorted(changes, key=lambda c: (ACTIONS.index(c["action"]), -(c["volume_m3"] or 0.0),
+                                          change_clause(c)))
+
+
+def answer(task, changes, order="size"):
     """The target answer for a task.
 
     Parameters
@@ -202,6 +254,8 @@ def answer(task, changes):
         One of ``TASKS``.
     changes : list of dict
         Index change records, in dataset order.
+    order : str
+        Clause order of ``describe`` answers, see ``order_changes``.
 
     Returns
     -------
@@ -210,7 +264,7 @@ def answer(task, changes):
     if task == "describe":
         if not changes:
             return "no changes are visible"
-        return "; ".join(change_clause(c) for c in changes)
+        return "; ".join(change_clause(c) for c in order_changes(changes, order))
     if task == "count":
         n = Counter(c["action"] for c in changes)
         return ", ".join(f"{n[a]} {PAST[a]}" for a in ACTIONS)
