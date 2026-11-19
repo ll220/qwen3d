@@ -468,6 +468,9 @@ def add_maskformer2_video_config(cfg):
     cfg.VLMCD.ONLY_VISIBLE_CHANGES = True  # answers list only changes seen in the chosen frames
     cfg.VLMCD.MIN_VISIBLE_PIXELS = 20    # pixels (at 256 px) for a change to count as seen
     cfg.VLMCD.ANSWER_ORDER = "size"      # describe clauses: by action, then largest object first ("dataset": as stored)
+    # "json": describe = JSON array of {action, class, distance_m (moved objects seen in
+    # both scans)}, count = {"moved": n, ...}; "text": the earlier "moved the vase ... by 6.4 m; ..."
+    cfg.VLMCD.ANSWER_FORMAT = "json"
     cfg.VLMCD.RETRIES = 5                # Hub read attempts per example
     cfg.VLMCD.CACHE_DIR = ""             # if set, cache eval frames here (deterministic at eval)
     cfg.VLMCD.LOCAL_DIR = ""             # read shards from a local `hf download` copy instead of streaming

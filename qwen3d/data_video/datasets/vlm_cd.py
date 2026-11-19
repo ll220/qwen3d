@@ -17,11 +17,18 @@ holds the light-weight parts:
 Tasks:
 
 ``describe``
-    "List every object that was moved, added or removed." The answer is one clause per
-    change, e.g. ``moved the vase on the diningtable by 6.4 m; removed the statue from the
-    shelfmesh``.
+    "List every object that was moved, added or removed." With ``VLMCD.ANSWER_FORMAT json``
+    (the default) the answer is a JSON array with one entry per change, e.g.
+    ``[{"action":"moved","class":"vase","distance_m":6.4},{"action":"removed","class":"statue"}]``
+    (no support surface, unlike ``text``: it is not scored, and leaving it out keeps
+    answers under the generation limit). ``distance_m`` (how far
+    the object's origin travelled, from the dataset's ``displacement_meters``) is given
+    only for moved objects seen in both scans, the only ones whose distance the model can
+    measure. With ``text`` it is one clause per change, e.g. ``moved the vase on the
+    diningtable by 6.4 m; removed the statue from the shelfmesh``.
 ``count``
-    "How many objects were moved, added and removed?" e.g. ``7 moved, 1 added, 1 removed``.
+    "How many objects were moved, added and removed?" e.g. ``{"moved":7,"added":1,"removed":1}``
+    (``json``) or ``7 moved, 1 added, 1 removed`` (``text``).
 """
 
 import json
@@ -36,6 +43,9 @@ TASKS = ("describe", "count")
 SPLITS = ("train", "val", "test")
 ACTIONS = ("move", "add", "remove")
 PAST = {"move": "moved", "add": "added", "remove": "removed"}
+PRESENT = {v: k for k, v in PAST.items()}
+ANSWER_FORMATS = ("json", "text")
+DISTANCE_DECIMALS = 2  # centimetres: a tenth of moves travel under 0.2 m
 
 _INDEX_CACHE = {}
 
@@ -168,10 +178,54 @@ def change_clause(change):
     return f"removed the {cat}" + (f" from the {surf}" if surf else "")
 
 
+def has_distance(change):
+    """Whether a ``json`` answer gives this change's distance.
+
+    Parameters
+    ----------
+    change : dict
+        An index change record; ``seen_before`` / ``seen_after`` are added by the mapper's
+        ``visible_changes`` (missing means seen).
+
+    Returns
+    -------
+    bool
+        True for a moved object with a known displacement that was seen at both its old
+        and its new place.
+    """
+    return (change["action"] == "move" and change.get("displacement_m") is not None
+            and change.get("seen_before", True) and change.get("seen_after", True))
+
+
+def change_record(change):
+    """One entry of a ``json`` ``describe`` answer.
+
+    Parameters
+    ----------
+    change : dict
+        An index change record.
+
+    Returns
+    -------
+    dict
+        ``action`` (``moved`` / ``added`` / ``removed``), ``class``, and ``distance_m`` when
+        ``has_distance``.
+    """
+    rec = {"action": PAST[change["action"]], "class": change["category"]}
+    if has_distance(change):
+        rec["distance_m"] = round(float(change["displacement_m"]), DISTANCE_DECIMALS)
+    return rec
+
+
+def _json(obj):
+    """Compact JSON (fewer tokens to generate)."""
+    return json.dumps(obj, separators=(",", ":"))
+
+
 STATE_ENCODINGS = ("time", "offset")
 
 
-def question(task, state_encoding="time"):
+def question(task, state_encoding="time", answer_format="json"):
     """The prompt for a task.
 
     How the two scans reach the model depends on ``VLMCD.STATE_ENCODING`` (see
@@ -189,11 +243,15 @@ def question(task, state_encoding="time"):
         One of ``TASKS``.
     state_encoding : str
         One of ``STATE_ENCODINGS``.
+    answer_format : str
+        One of ``ANSWER_FORMATS``.
 
     Returns
     -------
     str
     """
+    if answer_format not in ANSWER_FORMATS:
+        raise ValueError(f"unknown VLMCD.ANSWER_FORMAT {answer_format!r}; expected one of {ANSWER_FORMATS}")
     if state_encoding == "time":
         intro = ("The two point clouds show the same room scanned twice: the first before "
                  "and the second after some objects changed. ")
@@ -202,9 +260,17 @@ def question(task, state_encoding="time"):
                  "after some objects changed; the after scan is shifted along the x axis. ")
     else:
         raise ValueError(f"unknown VLMCD.STATE_ENCODING {state_encoding!r}; expected one of {STATE_ENCODINGS}")
+    if task == "describe" and answer_format == "json":
+        return intro + ("List every object that was moved, added or removed as a JSON array "
+                        "with one entry per object: "
+                        '{"action": "moved", "added" or "removed", "class": the object category, '
+                        '"distance_m": for a moved object, how far it moved in metres}.')
     if task == "describe":
         return intro + ("List every object that was moved, added or removed, "
                         "separated by semicolons.")
+    if task == "count" and answer_format == "json":
+        return intro + ("How many objects were moved, added and removed? Answer as JSON: "
+                        '{"moved": n, "added": n, "removed": n}.')
     if task == "count":
         return intro + "How many objects were moved, added and removed?"
     raise ValueError(task)
@@ -245,7 +311,7 @@ def order_changes(changes, order="size"):
                                           change_clause(c)))
 
 
-def answer(task, changes, order="size"):
+def answer(task, changes, order="size", answer_format="json"):
     """The target answer for a task.
 
     Parameters
@@ -256,11 +322,22 @@ def answer(task, changes, order="size"):
         Index change records, in dataset order.
     order : str
         Clause order of ``describe`` answers, see ``order_changes``.
+    answer_format : str
+        One of ``ANSWER_FORMATS``.
 
     Returns
     -------
     str
     """
+    if answer_format not in ANSWER_FORMATS:
+        raise ValueError(f"unknown VLMCD.ANSWER_FORMAT {answer_format!r}; expected one of {ANSWER_FORMATS}")
+    if answer_format == "json":
+        if task == "describe":
+            return _json([change_record(c) for c in order_changes(changes, order)])
+        if task == "count":
+            n = Counter(c["action"] for c in changes)
+            return _json({PAST[a]: n[a] for a in ACTIONS})
+        raise ValueError(task)
     if task == "describe":
         if not changes:
             return "no changes are visible"
@@ -271,8 +348,33 @@ def answer(task, changes, order="size"):
     raise ValueError(task)
 
 
-def parse_describe(text):
-    """Parse a ``describe`` answer back into ``(action, category)`` pairs.
+def _json_objects(text):
+    """JSON objects in a model output, as dicts.
+
+    Each ``{...}`` without nesting is parsed on its own, so an array cut off by the token
+    limit, or wrapped in extra text, still yields its complete entries.
+
+    Parameters
+    ----------
+    text : str
+
+    Returns
+    -------
+    list of dict
+    """
+    out = []
+    for m in re.finditer(r"\{[^{}]*\}", text):
+        try:
+            obj = json.loads(m.group(0))
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
+
+
+def parse_describe_records(text):
+    """Parse a ``describe`` answer, ``json`` or ``text``, into change records.
 
     Parameters
     ----------
@@ -281,16 +383,54 @@ def parse_describe(text):
 
     Returns
     -------
-    collections.Counter
-        Counts of ``(action, category)``.
+    list of tuple
+        ``(action, category, distance_m)``; ``action`` is ``move`` / ``add`` / ``remove``
+        and ``distance_m`` a float, or None when not given or not a number.
     """
-    out = Counter()
+    out = []
+    if text.lstrip().startswith(("[", "{")):
+        for obj in _json_objects(text):
+            action = PRESENT.get(str(obj.get("action", "")).strip().lower())
+            if action is None:
+                continue
+            cat = clean_category(str(obj.get("class") or ""))
+            try:
+                dist = float(obj["distance_m"]) if obj.get("distance_m") is not None else None
+            except (TypeError, ValueError):
+                dist = None
+            out.append((action, cat, dist if dist is None or dist == dist else None))
+        return out
     for clause in text.lower().split(";"):
         m = re.match(r"\s*(moved|added|removed)\s+(?:the|a|an)?\s*([a-z][a-z0-9]*)", clause)
         if m:
-            action = {"moved": "move", "added": "add", "removed": "remove"}[m.group(1)]
-            out[(action, m.group(2))] += 1
+            d = re.search(r"\bby\s+(\d+(?:\.\d*)?)\s*m\b", clause)
+            out.append((PRESENT[m.group(1)], m.group(2), float(d.group(1)) if d else None))
     return out
+
+
+def parse_describe(text):
+    """Parse a ``describe`` answer back into ``(action, category)`` pairs.
+
+    Parameters
+    ----------
+    text : str
+        Model output or ground truth, ``json`` or ``text``.
+
+    Returns
+    -------
+    collections.Counter
+        Counts of ``(action, category)``.
+    """
+    return Counter((a, c) for a, c, _ in parse_describe_records(text))
+
+
+def is_json_answer(text):
+    """Whether ``text`` parses as a whole JSON value (no truncation, no extra text)."""
+    try:
+        json.loads(text)
+    except ValueError:
+        return False
+    return True
 
 
 def parse_count(text):
@@ -305,6 +445,13 @@ def parse_count(text):
     dict
         ``{action: int or None}``.
     """
+    objs = _json_objects(text) if text.lstrip().startswith("{") else []
+    if objs:
+        out = {}
+        for a in ACTIONS:
+            v = objs[0].get(PAST[a])
+            out[a] = v if isinstance(v, int) and not isinstance(v, bool) else None
+        return out
     out = {}
     for a in ACTIONS:
         m = re.search(rf"(\d+)\s+{PAST[a]}", text.lower())

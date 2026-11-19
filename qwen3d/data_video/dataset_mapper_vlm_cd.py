@@ -95,7 +95,8 @@ def visible_changes(changes, visibility, before_ids, after_ids, min_pixels):
     Returns
     -------
     list of dict
-        The visible subset of ``changes``, in order.
+        Copies of the visible subset of ``changes``, in order, with ``seen_before`` and
+        ``seen_after`` added (a moved object's distance is only asked for when both hold).
     """
     seen_before, seen_after = set(), set()
     for i in before_ids:
@@ -112,7 +113,7 @@ def visible_changes(changes, visibility, before_ids, after_ids, min_pixels):
         if ((c["action"] == "remove" and o in seen_before)
                 or (c["action"] == "add" and o in seen_after)
                 or (c["action"] == "move" and (o in seen_before or o in seen_after))):
-            out.append(c)
+            out.append({**c, "seen_before": o in seen_before, "seen_after": o in seen_after})
     return out
 
 
@@ -334,8 +335,8 @@ class VlmCdDatasetMapper:
         if self.vc.ONLY_VISIBLE_CHANGES:
             changes = visible_changes(changes, fr["visibility"], before_ids, after_ids,
                                       self.vc.MIN_VISIBLE_PIXELS)
-        prompt = question(self.task, self.vc.STATE_ENCODING)
-        target = answer(self.task, changes, self.vc.ANSWER_ORDER)
+        prompt = question(self.task, self.vc.STATE_ENCODING, self.vc.ANSWER_FORMAT)
+        target = answer(self.task, changes, self.vc.ANSWER_ORDER, self.vc.ANSWER_FORMAT)
 
         native = fr["rgb_before"].shape[1]
         size = int(self.vc.IMAGE_SIZE) if self.vc.IMAGE_SIZE > 0 else native

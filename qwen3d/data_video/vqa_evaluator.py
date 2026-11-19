@@ -23,6 +23,7 @@ from qwen3d.data_video.referrential_grounding_evaluator import ReferrentialGroun
 # from pycocoevalcap.cider.cider import Cider
 # from pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
 import re
+from collections import Counter
 
 import ipdb
 st = ipdb.set_trace
@@ -36,6 +37,45 @@ from pycocoevalcap.cider.cider import Cider
 from pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
 
 tokenizer = PTBTokenizer()
+
+VLMCD_DIST_THRESHOLDS = (0.1, 0.25, 0.5)  # metres
+
+
+def match_move_distances(pred, gt):
+    """Pair predicted and ground-truth moved objects of one example to score their distances.
+
+    Within each class, predicted and true moves are paired one to one, minimising the
+    total absolute distance error (``scipy.optimize.linear_sum_assignment``). This is the
+    best case when an example moves several objects of the same class; with one object
+    per class, which is the usual case, it is simply the pair.
+
+    Parameters
+    ----------
+    pred, gt : list of tuple
+        ``parse_describe_records`` output.
+
+    Returns
+    -------
+    tuple
+        ``(errors, n_gt, n_missing)``: absolute errors in metres of the matched pairs,
+        ground-truth moves that have a distance, and of those, ones matched to a
+        prediction of the class that gave no distance.
+    """
+    from scipy.optimize import linear_sum_assignment
+    errors, n_gt, n_missing = [], 0, 0
+    classes = {c for a, c, d in gt if a == "move" and d is not None}
+    for cls in classes:
+        g = [d for a, c, d in gt if a == "move" and c == cls and d is not None]
+        p_all = [d for a, c, d in pred if a == "move" and c == cls]
+        p = [d for d in p_all if d is not None]
+        n_gt += len(g)
+        if p:
+            cost = np.abs(np.array(p)[:, None] - np.array(g)[None, :])
+            rows, cols = linear_sum_assignment(cost)
+            errors += [float(cost[r, c]) for r, c in zip(rows, cols)]
+        # Further true moves of the class, predicted as moved but without a distance.
+        n_missing += max(0, min(len(g), len(p_all)) - len(p))
+    return errors, n_gt, n_missing
 
 
 def vlmcd_metrics(dataset_name, res):
@@ -51,17 +91,35 @@ def vlmcd_metrics(dataset_name, res):
     -------
     dict
         ``describe``: micro precision / recall / F1 over ``(action, category)`` changes,
-        and per-action F1. ``count``: per-action and all-actions count accuracy, and the
+        and per-action F1. For moved objects whose true distance is given (seen in both
+        scans), paired by class (``match_move_distances``): ``move_dist_mae_m`` and
+        ``move_dist_medae_m`` (absolute error of the paired distances),
+        ``move_dist_acc_<t>m`` (share of pairs within t metres), ``move_dist_recall_0.25m``
+        (share of all such true moves found with the right class and a distance within
+        0.25 m), ``move_dist_pairs`` and ``move_dist_missing`` (paired moves without a
+        predicted distance). JSON answers add ``json_valid`` (share of predictions that
+        parse as a whole). ``count``: per-action and all-actions count accuracy, and the
         mean absolute error of the total.
     """
-    from qwen3d.data_video.datasets.vlm_cd import ACTIONS, dataset_task, parse_count, parse_describe
+    from qwen3d.data_video.datasets.vlm_cd import (ACTIONS, dataset_task, is_json_answer, parse_count,
+                                                   parse_describe_records)
     out = {}
     task = dataset_task(dataset_name)
     if task == "describe":
         tp = fp = fn = 0
         per = {a: [0, 0, 0] for a in ACTIONS}
+        errors, n_gt_dist, n_missing, n_json, json_task = [], 0, 0, 0, False
         for pred, answers in res:
-            p, g = parse_describe(pred), parse_describe(answers[0])
+            pr, gr = parse_describe_records(pred), parse_describe_records(answers[0])
+            p = Counter((a, c) for a, c, _ in pr)
+            g = Counter((a, c) for a, c, _ in gr)
+            e, n, m = match_move_distances(pr, gr)
+            errors += e
+            n_gt_dist += n
+            n_missing += m
+            if is_json_answer(answers[0]):
+                json_task = True
+                n_json += is_json_answer(pred)
             for key in set(p) | set(g):
                 t = min(p[key], g[key])
                 tp += t
@@ -76,6 +134,17 @@ def vlmcd_metrics(dataset_name, res):
                    change_f1=2 * prec * rec / (prec + rec) if prec + rec else 0.0)
         for a, (t, f_p, f_n) in per.items():
             out[f"{a}_f1"] = 2 * t / (2 * t + f_p + f_n) if t + f_p + f_n else 0.0
+        if n_gt_dist:
+            err = np.array(errors) if errors else np.array([np.nan])
+            out["move_dist_mae_m"] = float(np.mean(err))
+            out["move_dist_medae_m"] = float(np.median(err))
+            for t in VLMCD_DIST_THRESHOLDS:
+                out[f"move_dist_acc_{t}m"] = float(np.mean(err <= t)) if errors else 0.0
+            out["move_dist_recall_0.25m"] = sum(x <= 0.25 for x in errors) / n_gt_dist
+            out["move_dist_pairs"] = float(len(errors))
+            out["move_dist_missing"] = float(n_missing)
+        if json_task:
+            out["json_valid"] = n_json / max(len(res), 1)
     elif task == "count":
         correct = {a: 0 for a in ACTIONS}
         all_correct, abs_err = 0, 0.0
