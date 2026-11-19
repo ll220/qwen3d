@@ -181,6 +181,26 @@ class Qwen3D(nn.Module):
                 self.qwen_model.enable_input_require_grads()
                 self.qwen_model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
 
+        if cfg.COMPILE_LLM:
+            # torch.compile each decoder layer's forward. Only the forward is replaced, so the
+            # state_dict keys (and checkpoints) are unchanged. dynamic=True because the number of
+            # voxel and text tokens changes with every scene.
+            # Training forwards need no KV cache. With one, dynamo guards on its length, which
+            # differs per layer, and recompiles for every layer until it hits recompile_limit.
+            self.qwen_model.config.use_cache = False
+            base = self.qwen_model.get_base_model() if hasattr(self.qwen_model, "get_base_model") else self.qwen_model
+            for layer in base.model.layers:
+                eager = layer.forward
+                compiled = torch.compile(eager, dynamic=True)
+
+                def forward(*args, _eager=eager, _compiled=compiled, **kwargs):
+                    # Generation passes a KV cache and changes shapes every decode step: run eagerly.
+                    if kwargs.get("past_key_value") is not None:
+                        return _eager(*args, **kwargs)
+                    return _compiled(*args, **kwargs)
+
+                layer.forward = forward
+
         qwen_visual = getattr(self.qwen_model, "visual", None)
         if qwen_visual is None and hasattr(self.qwen_model, "base_model"):
             qwen_visual = getattr(self.qwen_model.base_model.model, "visual", None)

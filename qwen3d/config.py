@@ -183,6 +183,7 @@ def add_maskformer2_video_config(cfg):
     cfg.CACHE_QWEN_FEATURES = False
     cfg.ROPE_TYPE = "custom_txyz"
     cfg.GRADIENT_CHECKPOINTING = False
+    cfg.COMPILE_LLM = False  # torch.compile each LLM decoder layer (dynamic shapes); 3D front end stays eager
     cfg.CAUSAL_MASK = False
     cfg.INTERP_NEIGHBORS = 8
     cfg.MODEL.INTERPOLATION_METHOD = "nearest"
@@ -406,7 +407,9 @@ def add_maskformer2_video_config(cfg):
     cfg.DEPTH_NOISE_STD = 0.01
     cfg.TEST_DATASET_INFERENCE = False
     cfg.TEST_RESULT_EXPORT_PATH = None
-    cfg.WANDB_ENTITY = "katef_odin"
+    # None: wandb uses $WANDB_ENTITY, else the logged-in account's default entity. (Was the upstream
+    # authors' "katef_odin", which syncs from other accounts are refused with HTTP 403.)
+    cfg.WANDB_ENTITY = None
     cfg.AR_LLM = False
     cfg.AR_EMBED = False
     cfg.AR_INSTRUCT = False
