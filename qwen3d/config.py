@@ -458,8 +458,13 @@ def add_maskformer2_video_config(cfg):
     cfg.VLMCD.SAME_FRAMES = True         # use the same camera views for both states
     cfg.VLMCD.IMAGE_SIZE = 448           # upsample the 256 px frames (0 keeps 256: 81 instead of 256 tokens/frame)
     cfg.VLMCD.AFTER_OFFSET = 20.0        # metres the after scan is shifted along +x (rooms are < 11 m)
+    # "time": two point-cloud blocks at true coordinates, told apart by their RoPE time position
+    # (the offset then only keeps the scans out of each other's voxels and is removed after pooling).
+    # "offset": one block, the after scan left shifted by AFTER_OFFSET (the original setup).
+    cfg.VLMCD.STATE_ENCODING = "time"
     cfg.VLMCD.ONLY_VISIBLE_CHANGES = True  # answers list only changes seen in the chosen frames
     cfg.VLMCD.MIN_VISIBLE_PIXELS = 20    # pixels (at 256 px) for a change to count as seen
+    cfg.VLMCD.ANSWER_ORDER = "size"      # describe clauses: by action, then largest object first ("dataset": as stored)
     cfg.VLMCD.RETRIES = 5                # Hub read attempts per example
     cfg.VLMCD.CACHE_DIR = ""             # if set, cache eval frames here (deterministic at eval)
     cfg.VLMCD.LOCAL_DIR = ""             # read shards from a local `hf download` copy instead of streaming

@@ -16,7 +16,7 @@ from detectron2.structures import Boxes, ImageList, Instances
 from einops import rearrange
 from torch import nn
 from torch.nn import functional as F
-from torch_scatter import scatter_mean
+from torch_scatter import scatter_max, scatter_mean, scatter_min
 from transformers import AutoProcessor
 
 from qwen3d.conversation_template import (
@@ -699,22 +699,33 @@ class Qwen3D(nn.Module):
         return targets   
     
     # TODO: Change this so that bs > 1 is actually proper ([b, idx] should be [b, idx] because each batch may have different sizes so the inputs should actually be lists not a single tensor)
-    def random_sample_pointcloud(self, pointcloud, feature_cloud, pixel_indices, point2voxel, target_points):
-        """Simple random sampling - very fast but less structure-preserving"""
+    def random_sample_pointcloud(self, pointcloud, feature_cloud, pixel_indices, point2voxel, target_points,
+                                 voxel_state=None):
+        """Simple random sampling - very fast but less structure-preserving.
+
+        ``voxel_state`` ([B, N], optional): block id of each voxel (vlmcd before / after scans,
+        already grouped by ``group_voxels_by_state``). When given, the kept voxels stay in their
+        original order, so the blocks stay contiguous, and their block ids are returned as a
+        fifth element.
+        """
         batch_size, num_points, _ = pointcloud.shape
         device = pointcloud.device
-        
+
         downsampled_pc = []
         downsampled_features = []
         downsampled_p2v = []
         downsampled_pixel_indices = []
-        
+        downsampled_state = []
+
         target_points = min(target_points, num_points)
-        
+
         for b in range(batch_size):
             # Random sampling of voxels
             idx = torch.randperm(num_points, device=device)[:target_points]
-            
+            if voxel_state is not None:
+                idx = idx.sort().values
+                downsampled_state.append(voxel_state[b, idx])
+
             downsampled_pc.append(pointcloud[b, idx])
             downsampled_features.append(feature_cloud[b, idx])
             downsampled_pixel_indices.append(pixel_indices[b][idx])
@@ -752,12 +763,62 @@ class Qwen3D(nn.Module):
                     new_p2v[invalid_idx] = nearest_voxel_idx
             
             downsampled_p2v.append(new_p2v)
-        
-        return (
-            torch.stack(downsampled_pc), 
+
+        out = (
+            torch.stack(downsampled_pc),
             torch.stack(downsampled_features),
             torch.stack(downsampled_p2v),
             torch.stack(downsampled_pixel_indices)
+        )
+        if voxel_state is not None:
+            out = out + (torch.stack(downsampled_state),)
+        return out
+
+    def group_voxels_by_state(self, batched_input, pointcloud, featurecloud, pixel_indices, point2voxel):
+        """Split pooled voxels into one block per scan (vlmcd before / after).
+
+        The mapper shifts each scan's cameras by ``state_shift`` so no voxel mixes scans.
+        Here every voxel gets the scan of the views it came from, the shift is subtracted
+        so all scans sit at the room's true coordinates, and the voxels are grouped scan by
+        scan, ready to be spliced as consecutive ``<|vision_start|>`` blocks.
+
+        Parameters
+        ----------
+        batched_input : dict
+            The sample; uses ``view_states`` (scan id per view, in image order) and
+            ``state_shift`` (``[num_states, 3]`` metres added to each scan's cameras).
+        pointcloud : Tensor [1, N, 3]
+            Voxel centres.
+        featurecloud : Tensor [1, N, F]
+        pixel_indices : list of one Tensor [N, 2]
+        point2voxel : Tensor [1, P]
+            Voxel of each feature point (``P = views * h * w``, view-major).
+
+        Returns
+        -------
+        tuple
+            ``pointcloud``, ``featurecloud``, ``pixel_indices``, ``point2voxel`` reordered
+            (and un-shifted), and ``voxel_state`` ``[1, N]``, sorted ascending.
+        """
+        view_states = torch.as_tensor(batched_input["view_states"], dtype=torch.long, device=self.device)
+        shift = torch.as_tensor(batched_input["state_shift"], dtype=pointcloud.dtype, device=self.device)
+        p2v = point2voxel[0]
+        n_vox = pointcloud.shape[1]
+        assert p2v.numel() % view_states.numel() == 0, (p2v.numel(), view_states.numel())
+        point_state = view_states.repeat_interleave(p2v.numel() // view_states.numel())
+        lo = scatter_min(point_state, p2v, dim=0, dim_size=n_vox)[0]
+        hi = scatter_max(point_state, p2v, dim=0, dim_size=n_vox)[0]
+        assert torch.equal(lo, hi), "a voxel mixes points of two scans; raise VLMCD.AFTER_OFFSET"
+        order = torch.argsort(lo, stable=True)
+        inverse = torch.empty_like(order)
+        inverse[order] = torch.arange(n_vox, device=order.device)
+        xyz = pointcloud[0] - shift[lo]
+        return (
+            xyz[order].unsqueeze(0),
+            featurecloud[0][order].unsqueeze(0),
+            [pixel_indices[0][order]],
+            inverse[p2v].unsqueeze(0),
+            lo[order].unsqueeze(0),
         )
 
     def upsample_point_features(self, source_pc, source_features, target_pc, k_neighbors=3):
@@ -973,6 +1034,7 @@ class Qwen3D(nn.Module):
 
         bs = len(batched_inputs)
         assert bs == 1, "Currently only batch size of 1 is supported for qwen3D design"
+        voxel_state = None  # [1, N] scan id per voxel when a sample holds several scans
 
         if not batched_inputs[0].get("text_only", False):
             images = []
@@ -1022,6 +1084,19 @@ class Qwen3D(nn.Module):
                     [multiview_data["multi_scale_p2v"][i * 2 + 1][0] for i in range(bs)],
                     [len(batched_inputs[i]["images"]) for i in range(bs)],
                 )
+
+                # Several scans of one scene (vlmcd before / after, VLMCD.STATE_ENCODING time):
+                # one <|vision_start|> block per scan, at true coordinates.
+                if batched_inputs[0].get("view_states") is not None:
+                    (
+                        pointcloud,
+                        featurecloud,
+                        pixel_indices,
+                        point2voxel,
+                        voxel_state,
+                    ) = self.group_voxels_by_state(
+                        batched_inputs[0], pointcloud, featurecloud, pixel_indices, point2voxel
+                    )
             else:
                 featurecloud = featurecloud.unsqueeze(0)
 
@@ -1099,15 +1174,14 @@ class Qwen3D(nn.Module):
             # many frames are used (FRAME_MODE=all/every2 gives 30k-125k voxels, far beyond what the LLM was trained on).
             _cap = 0 if self.training else int(os.environ.get("EVAL_MAX_TOKENS", "0"))
             if (self.training or _cap > 0) and decoder_3d:
-                (
-                    pointcloud,
-                    featurecloud,
-                    point2voxel,
-                    pixel_indices,
-                ) = self.random_sample_pointcloud(
+                sampled = self.random_sample_pointcloud(
                     pointcloud, featurecloud, pixel_indices, point2voxel,
                     target_points=4096 if self.training else _cap,
+                    voxel_state=voxel_state,
                 )
+                pointcloud, featurecloud, point2voxel, pixel_indices = sampled[:4]
+                if voxel_state is not None:
+                    voxel_state = sampled[4]
             if self.training and self.cfg.GENERATION:
                 if actual_decoder_3d:
                     answers = [
@@ -1134,6 +1208,10 @@ class Qwen3D(nn.Module):
                 template = TEXT_INPUT_TRAIN if self.training else TEXT_INPUT_GEN
             elif decoder_3d:
                 template = TEXT_INPUT_TRAIN_3D if self.training else TEXT_INPUT_GEN_3D
+                if voxel_state is not None:
+                    # One <|vision_start|><|pointcloud_pad|><|vision_end|> block per scan.
+                    block = "<|vision_start|><|pointcloud_pad|><|vision_end|>"
+                    template = template.replace(block, block * len(batched_inputs[i]["state_shift"]))
             else:
                 template = TEXT_INPUT_TRAIN_2D if self.training else TEXT_INPUT_GEN_2D
 
@@ -1167,46 +1245,43 @@ class Qwen3D(nn.Module):
                 else self.qwen_model.config.image_token_id
             )
             pc_mask = input_ids == placeholder_token_id
-            assert pc_mask.sum() == 1, (
-                "There should be exactly one placeholder (point cloud / image) "
-                "token per input for now"
+            # One placeholder per block: one, or one per scan when voxel_state is set (the
+            # voxels are already grouped scan by scan, so block k takes the k-th group).
+            if voxel_state is not None:
+                n_blocks = len(batched_inputs[0]["state_shift"])
+                block_sizes = torch.bincount(voxel_state[0], minlength=n_blocks).tolist()
+                assert len(block_sizes) == n_blocks and min(block_sizes) > 0, (
+                    f"every scan needs voxels; got {block_sizes}"
+                )
+            else:
+                n_blocks = 1
+                block_sizes = [featurecloud[0].shape[0]]
+            assert (pc_mask.sum(dim=1) == n_blocks).all(), (
+                f"expected {n_blocks} placeholder (point cloud / image) token(s) per input"
             )
-            pc_pos = pc_mask.int().argmax(dim=1)  # [B]
+            pc_pos = pc_mask.int().argmax(dim=1)  # [B] first placeholder; the mask decoder reads it
 
             # Splice the visual / point features into the token sequence.
             new_attention_masks = []
             new_inputs_embeds = []
             new_input_ids = []
             for b in range(bs):
-                idx = pc_pos[b].item()
-                n_pts = featurecloud[b].shape[0]
-
-                new_attention_masks.append(
-                    torch.cat(
-                        [
-                            attention_mask[b, :idx],
-                            attention_mask.new_ones(n_pts),
-                            attention_mask[b, idx + 1 :],
-                        ],
-                        dim=0,
-                    )
-                )
-                new_inputs_embeds.append(
-                    torch.cat(
-                        [inputs_embeds[b, :idx], featurecloud[b], inputs_embeds[b, idx + 1 :]],
-                        dim=0,
-                    )
-                )
-                new_input_ids.append(
-                    torch.cat(
-                        [
-                            input_ids[b, :idx],
-                            input_ids.new_full((n_pts,), placeholder_token_id),
-                            input_ids[b, idx + 1 :],
-                        ],
-                        dim=0,
-                    )
-                )
+                positions = pc_mask[b].nonzero().flatten().tolist()
+                blocks = torch.split(featurecloud[b], block_sizes, dim=0)
+                masks, embeds, ids = [], [], []
+                prev = 0
+                for idx, feats in zip(positions, blocks):
+                    n_pts = feats.shape[0]
+                    masks += [attention_mask[b, prev:idx], attention_mask.new_ones(n_pts)]
+                    embeds += [inputs_embeds[b, prev:idx], feats]
+                    ids += [input_ids[b, prev:idx], input_ids.new_full((n_pts,), placeholder_token_id)]
+                    prev = idx + 1
+                masks.append(attention_mask[b, prev:])
+                embeds.append(inputs_embeds[b, prev:])
+                ids.append(input_ids[b, prev:])
+                new_attention_masks.append(torch.cat(masks, dim=0))
+                new_inputs_embeds.append(torch.cat(embeds, dim=0))
+                new_input_ids.append(torch.cat(ids, dim=0))
             inputs["input_ids"] = torch.stack(new_input_ids, dim=0)
             inputs["padding_mask"] = torch.stack(new_attention_masks, dim=0)
             inputs["inputs_embeds"] = torch.stack(new_inputs_embeds, dim=0)

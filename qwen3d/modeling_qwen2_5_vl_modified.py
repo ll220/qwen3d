@@ -1505,65 +1505,70 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
         pointcloud_xyz_pos: Optional[list] = None,
         pos_dtype = torch.bfloat16,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """4D (t, x, y, z) RoPE positions for a prompt holding point-cloud blocks.
+
+        Text tokens get ``t`` = their running index and ``x = y = z = 0``. Voxel tokens (runs
+        of ``<|pointcloud_pad|>``) get their metric xyz from ``pointcloud_xyz_pos``, in order,
+        and a ``t`` that depends on how many blocks the prompt has:
+
+        - one block (every Qwen-3D dataset): ``t = 0``, as Qwen-3D was trained; the voxels
+          do not advance the text index;
+        - several blocks (vlmcd before / after scans): each block takes one time step of its
+          own, the slot after its ``<|vision_start|>``, the way Qwen2.5-VL places an image,
+          so voxels at the same xyz in different blocks still have different positions.
+          The text after a block continues from that slot + 1.
+
+        Returns ``position_ids`` ``[4, B, L]`` and the per-example delta between the next
+        free ``t`` and the sequence length, used to place generated tokens.
+        """
         pointcloud_token_id = self.config.pointcloud_token_id
-        vision_start_token_id = self.config.vision_start_token_id
-        xyzrope_position_deltas = []
         assert pointcloud_xyz_pos is not None, "pointcloud_xyz_pos must be provided for xyz rope index calculation"
         assert input_ids is not None, "input_ids must be provided for xyz rope index calculation"
         assert pointcloud_xyz_pos.dtype == torch.float32, "pointcloud_xyz_pos must be in float32"
-        total_input_ids = input_ids
         if padding_mask is None:
-            padding_mask = torch.ones_like(total_input_ids)
-        position_ids = torch.zeros(
-            4,
-            input_ids.shape[0],
-            input_ids.shape[1],
-            dtype=pointcloud_xyz_pos.dtype,
-            device=input_ids.device,
-        )
-          
-        
-        pointcloud_index = 0,
-        padding_mask = padding_mask.to(total_input_ids.device)
-        for i, input_ids in enumerate(total_input_ids):
-            input_ids = input_ids[padding_mask[i] == 1]
-            pointcloud_nums = 0, 
-            vision_start_indices = torch.argwhere(input_ids == vision_start_token_id).squeeze(1)
-            vision_tokens = input_ids[vision_start_indices + 1]
-            pointcloud_nums = (vision_tokens == pointcloud_token_id).sum()
-            input_tokens = input_ids.tolist()
-            llm_pos_ids_list: list = []
-            st = 0
-            for pointcloud_idx in range(pointcloud_nums):
-                ed_pointcloud = input_tokens.index(pointcloud_token_id, st)
+            padding_mask = torch.ones_like(input_ids)
+        padding_mask = padding_mask.to(input_ids.device)
+        dtype, device = pointcloud_xyz_pos.dtype, pointcloud_xyz_pos.device
+        B, L = input_ids.shape
+        position_ids = torch.zeros(4, B, L, dtype=dtype, device=input_ids.device)
+        deltas = []
 
-                x_index = pointcloud_xyz_pos[pointcloud_index][:, 0]
-                y_index = pointcloud_xyz_pos[pointcloud_index][:, 1]
-                z_index = pointcloud_xyz_pos[pointcloud_index][:, 2]
+        def text_pos(n, start):
+            return torch.vstack([torch.arange(n, dtype=dtype, device=device) + start,
+                                 torch.zeros(3, n, dtype=dtype, device=device)])
 
-                text_len = ed_pointcloud - st
-                st_idx = llm_pos_ids_list[-2][0, :].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+        for i in range(B):
+            keep = padding_mask[i] == 1
+            ids = input_ids[i][keep]
+            is_pc = (ids == pointcloud_token_id).int()
+            # Blocks are runs of consecutive placeholder tokens.
+            edges = torch.diff(is_pc, prepend=is_pc.new_zeros(1), append=is_pc.new_zeros(1))
+            starts = (edges == 1).nonzero().flatten().tolist()
+            ends = (edges == -1).nonzero().flatten().tolist()
+            xyz = pointcloud_xyz_pos[i]
+            assert int(is_pc.sum()) == xyz.shape[0], (
+                f"{int(is_pc.sum())} point-cloud tokens but {xyz.shape[0]} xyz positions")
+            block_time = len(starts) > 1
 
-                t_index = torch.zeros_like(x_index, device=self.device)
-                text_pos = torch.vstack([torch.arange(text_len, dtype=pointcloud_xyz_pos.dtype, device=pointcloud_xyz_pos.device) + st_idx, 
-                                            torch.zeros(3, text_len, dtype=pointcloud_xyz_pos.dtype, device=pointcloud_xyz_pos.device)])
-                llm_pos_ids_list.append(text_pos)
-                llm_pos_ids_list.append(torch.stack([t_index, x_index, y_index, z_index]))
+            parts, st, t_next, off = [], 0, 0, 0
+            for s, e in zip(starts, ends):
+                parts.append(text_pos(s - st, t_next))
+                t_next += s - st
+                blk = xyz[off:off + e - s]
+                off += e - s
+                t_blk = float(t_next) if block_time else 0.0
+                parts.append(torch.cat([torch.full((1, e - s), t_blk, dtype=dtype, device=device), blk.T]))
+                if block_time:
+                    t_next += 1
+                st = e
+            if st < len(ids):
+                parts.append(text_pos(len(ids) - st, t_next))
+                t_next += len(ids) - st
 
-                st = ed_pointcloud + pointcloud_xyz_pos[pointcloud_index].shape[0]
+            position_ids[:, i, keep] = torch.cat(parts, dim=1).to(position_ids.device)
+            deltas.append(float(t_next - L))
 
-            if st < len(input_tokens):
-                st_idx = llm_pos_ids_list[-2][0, :].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                text_len = len(input_tokens) - st
-                text_pos = torch.vstack([torch.arange(text_len, dtype=pointcloud_xyz_pos.dtype, device=pointcloud_xyz_pos.device) + st_idx, 
-                                            torch.zeros(3, text_len, dtype=pointcloud_xyz_pos.dtype, device=pointcloud_xyz_pos.device)])  
-                llm_pos_ids_list.append(text_pos)              
-
-            llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(4, -1)
-            xyzrope_position_deltas.append(llm_pos_ids_list[-1].max() + 1 - len(total_input_ids[i]))
-
-        position_ids[..., i, padding_mask[i] == 1] = llm_positions.to(position_ids.device)
-        xyzrope_position_deltas = torch.tensor(xyzrope_position_deltas, device=input_ids.device).unsqueeze(1)
+        xyzrope_position_deltas = torch.tensor(deltas, device=input_ids.device).unsqueeze(1)
 
         return position_ids, xyzrope_position_deltas
 

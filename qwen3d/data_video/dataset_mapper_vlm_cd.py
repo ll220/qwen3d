@@ -9,9 +9,12 @@ One sample is one example (room + its changes) and one question (see
 2. picks ``cfg.VLMCD.FRAMES_PER_STATE`` frames per state (stratified random in training,
    evenly spaced at eval), by default the same camera views in both states;
 3. shifts the **after** cameras by ``cfg.VLMCD.AFTER_OFFSET`` metres along +x, so the two
-   states back-project into two disjoint copies of the room. Qwen-3D voxelises all frames
-   into one token set with metric xyz RoPE, so the shift keeps before and after voxels
-   apart and makes corresponding points differ by a constant offset;
+   states back-project into two disjoint copies of the room and never share a voxel when
+   Qwen-3D pools all frames. With ``VLMCD.STATE_ENCODING time`` (default) the model then
+   removes the shift and feeds each state as its own ``<|vision_start|>`` block at the
+   room's true coordinates, the blocks told apart by their RoPE time position (the sample
+   carries ``view_states`` and ``state_shift`` for this). With ``offset`` the shifted
+   copies go to the LLM as one block;
 4. optionally upsamples the 256 px frames to ``cfg.VLMCD.IMAGE_SIZE`` (more ViT tokens per
    frame), adjusting the intrinsics;
 5. builds the answer from the changes visible in the chosen frames, back-projects depth
@@ -331,8 +334,8 @@ class VlmCdDatasetMapper:
         if self.vc.ONLY_VISIBLE_CHANGES:
             changes = visible_changes(changes, fr["visibility"], before_ids, after_ids,
                                       self.vc.MIN_VISIBLE_PIXELS)
-        prompt = question(self.task)
-        target = answer(self.task, changes)
+        prompt = question(self.task, self.vc.STATE_ENCODING)
+        target = answer(self.task, changes, self.vc.ANSWER_ORDER)
 
         native = fr["rgb_before"].shape[1]
         size = int(self.vc.IMAGE_SIZE) if self.vc.IMAGE_SIZE > 0 else native
@@ -377,6 +380,16 @@ class VlmCdDatasetMapper:
             max_pixel=self.cfg.INPUT.MAX_PIXEL,
         )
         pv_list, grid_list = qwen_preprocess_frames(self._qwen_image_processor, images)
+
+        # STATE_ENCODING time: tell the model which views belong to which scan and how far
+        # each scan was shifted, so it can pool them apart, undo the shift and give each
+        # scan its own <|vision_start|> block (Qwen3D.group_voxels_by_state).
+        state_info = {}
+        if self.vc.STATE_ENCODING == "time":
+            state_info = {
+                "view_states": [i for i, s in enumerate(STATES) for _ in fr[f"rgb_{s}"]],
+                "state_shift": [[0.0, 0.0, 0.0], [float(self.vc.AFTER_OFFSET), 0.0, 0.0]],
+            }
 
         counts = {a: sum(c["action"] == a for c in changes) for a in ACTIONS}
         lang = {
@@ -432,4 +445,5 @@ class VlmCdDatasetMapper:
             "max_frames": num_views,
             "use_ghost": False,
             "pseudo_2d_aug": False,
+            **state_info,
         }
